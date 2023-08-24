@@ -3,9 +3,10 @@
 # we estimate the gcf by precalculating the gcf for a dense grid (1000x image res) and
 # then use these gcf values (for a massive speed increase)
 import numpy as np
-from gridding import *
-from classes import *
+from vis_sample.gridding import *
+from vis_sample.classes import *
 from numpy.lib.stride_tricks import as_strided
+from vis_sample.file_handling import import_data_ms
 
 
 
@@ -32,7 +33,7 @@ def calc_dense_grid_gcf():
 # Here we calculated all the gcf values for the visibilities and then pass the values
 # and indices to a GCF_holder
 
-def create_gcf_holder(uu, vv, vis):
+def create_gcf_holder(uu, vv, vis, filename):
     """Return GcfHolder object for a given dataset of (u,v) visibilities
 
     Parameters
@@ -92,7 +93,9 @@ def create_gcf_holder(uu, vv, vis):
     all_weights = np.einsum('...a,...b->...ab', vw, uw)
     w_arr = np.einsum('...ab->...', all_weights)
 
-    return GcfHolder(index_arr, all_weights, w_arr, uu, vv)
+    data_vis = import_data_ms(filename)
+
+    return GcfHolder(index_arr, all_weights, w_arr, uu, vv, data_vis)
 
 
 
@@ -100,7 +103,7 @@ def create_gcf_holder(uu, vv, vis):
 # The interpolation call will first calculate the gcf holder (if not provided), and then use
 # those values to calculate the interpolated visibilities. 
 
-def interpolate_uv(uu, vv, vis, gcf_holder=None):
+def interpolate_uv(uu, vv, vis, gcf_holder=None, filename=None):
     """Calculate interpolated visibilities
 
     Parameters
@@ -117,7 +120,7 @@ def interpolate_uv(uu, vv, vis, gcf_holder=None):
     """
     # create gcf_holder if one isn't provided
     if not gcf_holder:
-        gcf_holder = create_gcf_holder(uu, vv, vis)
+        gcf_holder = create_gcf_holder(uu, vv, vis, filename)
 
     # create the new interpolated visibility holder
     nvis = vv.shape[0]

@@ -1,13 +1,14 @@
 import numpy as np
 import sys
-from gridding import *
-from classes import *
-from transforms import *
-from interpolation import interpolate_uv
-from file_handling import *
+from vis_sample.gridding import *
+from vis_sample.classes import *
+from vis_sample.transforms import *
+from vis_sample.interpolation import interpolate_uv
+from vis_sample.file_handling import *
+from scipy import ndimage
 import time
 
-def vis_sample(imagefile=None, uvfile=None, uu=None, vv=None, mu_RA=0, mu_DEC=0, src_distance=None, gcf_holder=None, corr_cache=None, mode="interpolate", outfile=None, verbose=False, return_gcf=False, return_corr_cache=False):
+def vis_sample(imagefile=None, uvfile=None, uu=None, vv=None, mu_RA=0, mu_DEC=0, src_distance=None, gcf_holder=None, corr_cache=None, mode="interpolate", outfile=None, verbose=False, return_gcf=False, return_corr_cache=False, mod_interp=True, mod_rfreq=None, noise_inject=None):
     """Sample visibilities from a sky-brightness image
 
     vis_sample allows you to sample visibilities from a user-supplied sky-brightness image. 
@@ -50,6 +51,12 @@ def vis_sample(imagefile=None, uvfile=None, uu=None, vv=None, mu_RA=0, mu_DEC=0,
     return_gcf - (boolean) flag to return the gcf cache to allow faster interpolation for many models   
     
     return_corr_cache - (boolean) flag to return the correction function cache to allow faster interpolation for many models 
+
+    mod_interp - (boolean, default = True) flag as the whether the model input should be interpolated (spectrally) onto the channels of the input uvfile
+
+    mod_rfreq - (optional, float) rest frequency for the model file [Hz]. Can be used to align model and data
+
+    noise_inject - (optional, float) noise to inject into the sampled visibilities when writing back to an MS. In units of mJy/bm for a naturally weighted dirty image. Requires outfile != None
 
 
     Usage::
@@ -112,6 +119,7 @@ def vis_sample(imagefile=None, uvfile=None, uu=None, vv=None, mu_RA=0, mu_DEC=0,
     # if we don't have uu and vv specified, then read from the cache being fed in
     if gcf_holder:
         gcf_holder = gcf_holder
+        data_vis = gcf_holder.data_vis
 
     # or read them in from the data file
     elif uvfile:
@@ -156,13 +164,14 @@ def vis_sample(imagefile=None, uvfile=None, uu=None, vv=None, mu_RA=0, mu_DEC=0,
         if src_distance is None:
              print("A source distance in pc needs to be provided in order to process a RADMC3D image file")
              return 
-        else: mod_sky_img = import_model_radmc(src_distance, imagefile)
+        else: mod_sky_img = import_model_radmc(src_distance, imagefile, mod_rfreq)
     elif "fits" in imagefile:
-        mod_sky_img = import_model_fits(imagefile)
+        mod_sky_img = import_model_fits(imagefile, mod_rfreq)
     else:
         print("Not a valid model image option. Please provide a FITS file, a RADMC3D image file, or a SkyImage object).")
         return 
 
+    # TODO - fix the error cases here now that mod_interp is an option
     # since we clone the data file for write-out, the number of channels need to match the model
     if uvfile and (len(mod_sky_img.freqs)!=len(data_vis.freqs)):
         if mode=="diff":
@@ -170,6 +179,56 @@ def vis_sample(imagefile=None, uvfile=None, uu=None, vv=None, mu_RA=0, mu_DEC=0,
             return
         else:
             print("WARNING: Number of channels in data does not match number of channels in model image. Interpolation can be completed, but model visibilities may not be able to be written to file.")
+
+
+
+
+    #############################
+    #   Interpolate the model   #
+    #############################
+
+    # if interpolation enabled, then make the model match data resolution (in velocity space)
+    if mod_interp:
+        if verbose:
+            print("Interpolating model")
+            t0 = time.time()
+
+        # determine the freq spacings
+        mod_delfreq = mod_sky_img.freqs[1] - mod_sky_img.freqs[0]
+        data_delfreq = data_vis.freqs[1] - data_vis.freqs[0]
+
+        # make sure the model and data both ascend or both descend in freq
+        if data_delfreq < 0:
+            if mod_delfreq > 0:
+                mod_sky_img.data = mod_sky_img.data[:,:,::-1]
+                mod_delfreq = -mod_delfreq
+        else:
+            if mod_delfreq < 0:
+                mod_sky_img.data = mod_sky_img.data[:,:,::-1]
+                mod_delfreq = -mod_delfreq
+
+        nchan_model = len(mod_sky_img.freqs)
+        nchan_data = len(data_vis.freqs)
+
+        chan_grid = np.arange(nchan_model)
+        interp_chans = np.interp(data_vis.vels, mod_sky_img.vels, chan_grid)
+
+        interp_grid_x, interp_grid_y, interp_grid_chan = np.meshgrid(np.arange(mod_sky_img.data.shape[0]), np.arange(mod_sky_img.data.shape[1]), interp_chans)
+
+        interp_grid_x = np.ravel(interp_grid_x)
+        interp_grid_y = np.ravel(interp_grid_y)
+        interp_grid_chan = np.ravel(interp_grid_chan)
+
+        interp_data = ndimage.map_coordinates(mod_sky_img.data, [interp_grid_y, interp_grid_x, interp_grid_chan], order=1)
+        interp_data = interp_data.reshape((mod_sky_img.data.shape[0], mod_sky_img.data.shape[1], interp_chans.shape[0]))
+
+        mod_sky_img.data = interp_data
+        mod_sky_img.freqs = ndimage.map_coordinates(mod_sky_img.freqs, [interp_chans], order=1)
+
+        if verbose: 
+            t1 = time.time()
+            print("Model interpolated from " + str(nchan_model) + " channels to " + str(len(mod_sky_img.freqs)) + " channels")
+            print("Model interpolation time = " + str(t1-t0))
 
 
 
@@ -222,12 +281,13 @@ def vis_sample(imagefile=None, uvfile=None, uu=None, vv=None, mu_RA=0, mu_DEC=0,
     # dummy exists because interpolate_uv always returns a gcf_holder, but we don't need it
     if gcf_holder:
         interp, dummy = interpolate_uv(gcf_holder.uu, gcf_holder.vv, mod_fft, gcf_holder=gcf_holder)
+        data_vis = gcf_holder.data_vis
 
     elif uvfile:
-        interp, gcf_holder = interpolate_uv(data_vis.uu, data_vis.vv, mod_fft)
+        interp, gcf_holder = interpolate_uv(data_vis.uu, data_vis.vv, mod_fft, filename=uvfile)
 
     else:
-        interp, gcf_holder = interpolate_uv(uu, vv, mod_fft)
+        interp, gcf_holder = interpolate_uv(uu, vv, mod_fft, filename=uvfile)
 
     t1 = time.time()
     if verbose: 
@@ -295,9 +355,9 @@ def vis_sample(imagefile=None, uvfile=None, uu=None, vv=None, mu_RA=0, mu_DEC=0,
 
             # check to see what type of file we're cloning and exporting
             if "fits" in outfile:
-                export_uvfits_from_clone(interp_vis, outfile, uvfile)
+                export_uvfits_from_clone(interp_vis, outfile, uvfile, noise_inject)
             elif "ms" in outfile:
-                export_ms_from_clone(interp_vis, outfile, uvfile)
+                export_ms_from_clone(interp_vis, outfile, uvfile, noise_inject)
 
             # and we're done!
             return 
@@ -314,9 +374,9 @@ def vis_sample(imagefile=None, uvfile=None, uu=None, vv=None, mu_RA=0, mu_DEC=0,
 
             # check to see what type of file we're cloning and exporting
             if "fits" in outfile:
-                export_uvfits_from_clone(interp_vis, outfile, uvfile)
+                export_uvfits_from_clone(interp_vis, outfile, uvfile, noise_inject)
             elif "ms" in outfile:
-                export_ms_from_clone(interp_vis, outfile, uvfile)
+                export_ms_from_clone(interp_vis, outfile, uvfile, noise_inject)
 
             # and we're done!
             return

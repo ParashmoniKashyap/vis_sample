@@ -1,8 +1,8 @@
 import numpy as np
 import astropy.io.fits as pyfits
 import astropy.io.ascii as ascii
-from constants import *
-from transforms import *
+from vis_sample.constants import *
+from vis_sample.transforms import *
 import sys
 import shutil
 
@@ -44,14 +44,14 @@ def import_data_uvfits(filename):
 def import_data_ms(filename):
     """Imports data from a casa measurement set (ms) and returns Visibility object"""
     try:
-        import casac
+        import casatools
     except ImportError:
-        print("casac was not able to be imported, make sure all dependent packages are installed")
-        print("try: conda install -c pkgw casa-python casa-data")
+        print("casatools was not able to be imported, make sure all dependent packages are installed")
+        print("try instructions at https://casa.nrao.edu/casadocs/casa-5.6.0/introduction/casa6-installation-and-usage")
         sys.exit(1)
 
-    tb = casac.casac.table()
-    ms = casac.casac.ms()
+    tb = casatools.table()
+    ms = casatools.ms()
     
     # Use CASA table tools to get columns of UVW, DATA, WEIGHT, etc.
     tb.open(filename)
@@ -74,7 +74,10 @@ def import_data_ms(filename):
     # Use CASA table tools to get frequencies
     tb.open(filename+"/SPECTRAL_WINDOW")
     freqs = tb.getcol("CHAN_FREQ")
-    rfreq = tb.getcol("REF_FREQUENCY")
+    tb.close()
+
+    tb.open(filename+"/SOURCE")
+    rfreq = tb.getcol("REST_FREQUENCY")[0][0]
     tb.close()
 
 
@@ -146,15 +149,22 @@ def import_data_ms(filename):
     #data_vv = data_vv[np.logical_not(flags)]
     #data_VV = data_VV[:,np.logical_not(flags)]
 
-    return Visibility(data_VV.T, data_uu, data_vv, data_wgts, freqs)
+    return Visibility(data_VV.T, data_uu, data_vv, data_wgts, freqs, rfreq)
 
 
 # imports model from a FITS file - note the assumptions on dimensions
-def import_model_fits(filename):
+def import_model_fits(filename, mod_rfreq=None):
     """Imports model from a FITS file and returns SkyImage object
 
     Note the assumption that RA and DEC are given in degrees (converted to arcsec when returned in SkyImage object)
+
+    Parameters
+    __________
+    filename: FITS file, should have CTYPE3 = 'FREQ', not 'VEL'
+    mod_rfreq: (optional) rest frequency
     """
+    # TODO: make flexible for VEL and FREQ
+
     mod = pyfits.open(filename)
 
     # first sterilize the input and remove any dummy channel or polarization dimensions
@@ -191,26 +201,27 @@ def import_model_fits(filename):
 
     # should be prepared for the case that it is a single channel image and that CRPIX3 and CDELT3 not set
     try:
-        nchan_vel = mhd['NAXIS3']
-        mid_chan_vel = mhd['CRVAL3']
+        nchan_freq = mhd['NAXIS3']
+        mid_chan_freq = mhd['CRVAL3']
         mid_chan = mhd['CRPIX3']
-        delt_vel = mhd['CDELT3']
-        mod_vels = (np.arange(nchan_vel)-(mid_chan-1))*delt_vel + mid_chan_vel
+        delt_freq = mhd['CDELT3']
+        mod_freqs = (np.arange(nchan_freq)-(mid_chan-1))*delt_freq + mid_chan_freq
     except:
         # remember that this is effectively a dummy placeholder, so this is sketchy but should probably be ok
-        mod_vels = [0] 
+        mod_freqs = [0] 
 
-    return SkyImage(mod_data, mod_ra, mod_dec, mod_vels)
+    return SkyImage(mod_data, mod_ra, mod_dec, mod_freqs, mod_rfreq)
 
 
 
-def import_model_radmc(src_distance, filename):
+def import_model_radmc(src_distance, filename, mod_rfreq=None):
     """Imports model from a RADMC3D image.out file (ascii format) and returns SkyImage object
 
     Parameters
     __________
     src_distance: Distance to source in parsecs
     filename: RADMC3d image file (should end in ".out")
+    mod_rfreq: (optional) rest frequency
     """
     imagefile = open(filename)
     iformat = imagefile.readline()
@@ -227,12 +238,11 @@ def import_model_radmc(src_distance, filename):
     pixsize = pixsize_x*pixsize_y/(src_distance*pc)**2 #pixel size in steradians
     mod_data = np.rollaxis(np.reshape(imvals[nlam:],[nlam, im_ny, im_nx]),0,3)*pixsize*10**23
 
-    return SkyImage(np.fliplr(mod_data).astype('float64'), mod_ra, mod_dec, mod_lams)
+    return SkyImage(np.fliplr(mod_data).astype('float64'), mod_ra, mod_dec, mod_lams, mod_rfreq)
 
 
 # ONLY CAN CLONE UVFITS
-# TODO - FIGURE OUT HOW TO WRITE FROM SCRATCH
-def export_uvfits_from_clone(vis, outfile, uvfits_clone):
+def export_uvfits_from_clone(vis, outfile, uvfits_clone, noise_inject=None):
     """Exports model visibilities to uvfits file
 
     Parameters
@@ -240,6 +250,7 @@ def export_uvfits_from_clone(vis, outfile, uvfits_clone):
     vis: Visibility object
     outfile: Name of file being written out to
     ms_clone: Input uvfits file being cloned
+    noise_inject: Amount of noise (if any) to inject into dataset
     """
     clone = pyfits.open(uvfits_clone)
     clone_data = clone[0].data
@@ -270,8 +281,7 @@ def export_uvfits_from_clone(vis, outfile, uvfits_clone):
 
 
 # ONLY CAN CLONE MS
-# TODO - FIGURE OUT HOW TO WRITE FROM SCRATCH
-def export_ms_from_clone(vis, outfile, ms_clone):
+def export_ms_from_clone(vis, outfile, ms_clone, noise_inject=None):
     """Exports model visibilities to measurement set
 
     Parameters
@@ -279,17 +289,26 @@ def export_ms_from_clone(vis, outfile, ms_clone):
     vis: Visibility object
     outfile: Name of file being written out to
     ms_clone: Input measurement set being cloned
+    noise_inject: Amount of noise (if any) to inject into dataset
     """
     try:
-        import casac
+        import casatools
     except ImportError:
-        print("casac was not able to be imported, make sure all dependent packages are installed")
-        print("try: conda install -c pkgw casa-python casa-data")
+        print("casatools was not able to be imported, make sure all dependent packages are installed")
+        print("try instructions at https://casa.nrao.edu/casadocs/casa-5.6.0/introduction/casa6-installation-and-usage")
         sys.exit(1)
+
+    # First inject noise if desired into the visibilities
+    if noise_inject:
+        nvis = vis.VV.shape[0]
+        nchan = vis.VV.shape[1]
+        noise = np.random.normal(0., noise_inject/1000.*np.sqrt(nvis), (nvis, nchan)) + np.random.normal(0., noise_inject/1000.*np.sqrt(nvis), (nvis, nchan))*1.j
+        vis.VV += noise
+        
 
     shutil.copytree(ms_clone, outfile)
 
-    tb = casac.casac.table()
+    tb = casatools.table()
     
     # Use CASA table tools to fill new DATA and WEIGHT
     tb.open(outfile, nomodify=False)
