@@ -144,10 +144,10 @@ def import_data_ms(filename):
 
     # now remove all flagged data (we assume the user doesn't want to interpolate for these points)
     # commenting this out for now, but leaving infrastructure in place if desired later
-    #data_wgts = data_wgts[np.logical_not(flags)]
-    #data_uu = data_uu[np.logical_not(flags)]
-    #data_vv = data_vv[np.logical_not(flags)]
-    #data_VV = data_VV[:,np.logical_not(flags)]
+    data_wgts = data_wgts[np.logical_not(flags)]
+    data_uu = data_uu[np.logical_not(flags)]
+    data_vv = data_vv[np.logical_not(flags)]
+    data_VV = data_VV[:,np.logical_not(flags)]
 
     return Visibility(data_VV.T, data_uu, data_vv, data_wgts, freqs, rfreq)
 
