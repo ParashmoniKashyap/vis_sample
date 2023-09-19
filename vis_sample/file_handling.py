@@ -140,7 +140,8 @@ def import_data_ms(filename):
 
     #warning that flagged data was imported
     if np.any(flags):
-        print("WARNING: Flagged data was imported. Visibility interpolation can proceed normally, but be careful with chi^2 calculations.")
+        #print("WARNING: Flagged data was imported. Visibility interpolation can proceed normally, but be careful with chi^2 calculations.")
+        print("NOTE: Flagged data was removed. Interpolation won't be happening for these points")
 
     # now remove all flagged data (we assume the user doesn't want to interpolate for these points)
     # commenting this out for now, but leaving infrastructure in place if desired later
